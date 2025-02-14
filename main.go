@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +8,7 @@ import (
 	"strings"
 
 	_ "github.com/joho/godotenv/autoload"
+	"github.com/tidwall/gjson"
 )
 
 var config = Configs{
@@ -110,29 +110,9 @@ func getRootIdUrl(client *http.Client) string {
 		os.Exit(1)
 	}
 
-	// Unmarshal JSON into a map
-	var result map[string]interface{}
-	err = json.Unmarshal(body, &result)
-	if err != nil {
-		fmt.Println("Error decoding JSON:", err)
-		os.Exit(1)
-	}
-	// Navigate through the nested structure
-	links, ok := result["_links"].(map[string]interface{})
-	if !ok {
-		fmt.Println("Error: '_links' not found")
-		os.Exit(1)
-	}
-
-	content, ok := links["content"].([]interface{})
-	if !ok || len(content) != 2 {
-		fmt.Println("Error: 'content' not found or too short")
-		os.Exit(1)
-	}
-
-	href, ok := content[1].(map[string]interface{})["href"].(string)
-	if !ok {
-		fmt.Println("Error: 'href' not found")
+	href := gjson.Get(string(body), "_links.content.1.href").String()
+	if href == "" {
+		fmt.Println("Error: Could not find the desired link in JSON")
 		os.Exit(1)
 	}
 	return href
