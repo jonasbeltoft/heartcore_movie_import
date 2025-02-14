@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,9 +23,9 @@ func main() {
 	// Create an HTTP client
 	client := &http.Client{}
 
-	rootUrl, err := getRootIdUrl(client)
-	if err != nil || rootUrl == "" {
-		fmt.Println(err)
+	rootUrl := getRootIdUrl(client)
+	if rootUrl == "" {
+		fmt.Println("Root URL is empty")
 		return
 	}
 
@@ -88,7 +87,7 @@ func main() {
 	// Publish new content https://docs.umbraco.com/umbraco-heartcore/api-documentation/content-management/content#publish-content
 }
 
-func getRootIdUrl(client *http.Client) (string, error) {
+func getRootIdUrl(client *http.Client) string {
 	req, err := http.NewRequest("GET", config.UmbBaseURL+"content", nil)
 	if err != nil {
 		fmt.Println("Error getting base URL:", err)
@@ -111,20 +110,32 @@ func getRootIdUrl(client *http.Client) (string, error) {
 		os.Exit(1)
 	}
 
-	// Unmarshal JSON into struct
-	var result APIRootResponse
+	// Unmarshal JSON into a map
+	var result map[string]interface{}
 	err = json.Unmarshal(body, &result)
 	if err != nil {
 		fmt.Println("Error decoding JSON:", err)
 		os.Exit(1)
 	}
-
-	for i, v := range result.Links.Content {
-		if i == 1 {
-			return v.Href, nil
-		}
+	// Navigate through the nested structure
+	links, ok := result["_links"].(map[string]interface{})
+	if !ok {
+		fmt.Println("Error: '_links' not found")
+		os.Exit(1)
 	}
-	return "", errors.New("no URL was found")
+
+	content, ok := links["content"].([]interface{})
+	if !ok || len(content) != 2 {
+		fmt.Println("Error: 'content' not found or too short")
+		os.Exit(1)
+	}
+
+	href, ok := content[1].(map[string]interface{})["href"].(string)
+	if !ok {
+		fmt.Println("Error: 'href' not found")
+		os.Exit(1)
+	}
+	return href
 }
 
 func setHeader(req *http.Request) {
@@ -150,18 +161,4 @@ type TVMazeShow struct {
 type Image struct {
 	Medium   string `json:"medium,omitempty"`
 	Original string `json:"original,omitempty"`
-}
-
-type APIRootResponse struct {
-	Links Links `json:"_links"`
-}
-
-type Links struct {
-	Content  []Link `json:"content,omitempty"`
-	Children Link   `json:"children,omitempty"`
-}
-
-type Link struct {
-	Href  string `json:"href,omitempty"`
-	Title string `json:"title,omitempty"`
 }
