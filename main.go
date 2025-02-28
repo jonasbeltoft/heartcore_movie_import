@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"strconv"
@@ -27,6 +29,9 @@ var PAGE_SIZE = 250
 var LANGUAGE = "en-US"
 
 func main() {
+	key, _ := createUmbImage("SomeImgName.jpg", "https://static.tvmaze.com/uploads/images/medium_portrait/1/4600.jpg")
+	fmt.Println(key)
+	return
 
 	// Create an HTTP client
 	client := &http.Client{}
@@ -57,12 +62,6 @@ func main() {
 		*allUmbShows = append(*allUmbShows, *shows...)
 	}
 
-	str, err := json.MarshalIndent(allUmbShows, "", "  ")
-	if err != nil {
-		return
-	}
-	fmt.Println(string(str))
-
 	// Sort Umbraco entries by movie ID or make into hashmap based on ID
 	// Start fetching and uploading Maze movies.
 	// 		If a movie exists in memory, and the data is not empty, skip it.
@@ -72,6 +71,129 @@ func main() {
 	// mazeShowsPaged := &[]TVMazeShow{}
 
 	// uploadBatch(*mazeShowsPaged, "UMBRACO UPLOAD URL")
+}
+
+// Returns the mediaKey of this new media image
+func createUmbImage(imgName string, imgUrl string) (string, error) {
+
+	// Define the metadata as a struct
+	metadata := map[string]interface{}{
+		"mediaTypeAlias": "Image",
+		"name":           imgName,
+		"umbracoFile": map[string]string{
+			"src": imgName,
+		},
+	}
+
+	// Convert metadata to JSON
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		fmt.Println("Error encoding JSON:", err)
+		return "", err
+	}
+
+	// Fetch the image from the URL
+	resp, err := http.Get(imgUrl)
+	if err != nil {
+		fmt.Println("Error downloading image:", err)
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	// Check if the request was successful
+	if resp.StatusCode != http.StatusOK {
+		fmt.Println("Failed to download image, status:", resp.Status)
+		return "", err
+	}
+
+	// Read the image data
+	imageData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("Error reading image data:", err)
+		return "", err
+	}
+
+	// Create a buffer and a multipart writer
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	// Add the JSON metadata as a form field
+	metadataPart, err := writer.CreateFormField("content")
+	if err != nil {
+		fmt.Println("Error creating metadata part:", err)
+		return "", err
+	}
+	_, err = metadataPart.Write(metadataJSON)
+	if err != nil {
+		fmt.Println("Error writing metadata:", err)
+		return "", err
+	}
+
+	// Create the file field in the multipart form
+	filePart, err := writer.CreateFormFile("umbracoFile", imgName)
+	if err != nil {
+		fmt.Println("Error creating file part:", err)
+		return "", err
+	}
+
+	// Write the image data to the file part
+	_, err = filePart.Write(imageData)
+	if err != nil {
+		fmt.Println("Error writing image data:", err)
+		return "", err
+	}
+
+	// Close the writer to finalize the multipart body
+	writer.Close()
+
+	// Create the request
+	req, err := http.NewRequest("POST", config.UmbBaseURL+"media", body)
+	if err != nil {
+		fmt.Println("Error creating request:", err)
+		return "", err
+	}
+
+	// Set headers
+	setAuthHeader(req)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	// Send the request
+	client := &http.Client{}
+	resp, err = client.Do(req)
+	if err != nil {
+		fmt.Println("Error sending request:", err)
+		return "", err
+	}
+	defer resp.Body.Close()
+	// Read response body
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != 201 {
+		fmt.Println("Error reading response:", err)
+		return "", err
+	}
+
+	return gjson.Get(string(respBody), "_id").String(), nil
+}
+
+func createUmbShow(client *http.Client, show Show) error {
+
+	// SET THE BODY
+
+	req, err := http.NewRequest("POST", config.UmbRootItemURL, nil)
+	if err != nil {
+		fmt.Println("Error creating request:", err)
+		return err
+	}
+	setAuthHeader(req)
+
+	// Send request
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		fmt.Printf("Error sending request. Status: %d\nError: %v", resp.StatusCode, err)
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
 }
 
 // NOT FINISHED
@@ -122,12 +244,14 @@ func uploadBatch(shows []Show, apiURL string) error {
 }
 
 func getUmbShowPage(client *http.Client, url string) *[]Show {
+	defer timeTrack(time.Now(), "Download and parse")
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		fmt.Println("Error creating request:", err)
 		os.Exit(1)
 	}
-	setHeader(req)
+	setAuthHeader(req)
 
 	// Send request
 	resp, err := client.Do(req)
@@ -194,7 +318,7 @@ func getUmbShowCount(client *http.Client) int {
 		fmt.Println("Error creating request:", err)
 		os.Exit(1)
 	}
-	setHeader(req)
+	setAuthHeader(req)
 
 	// Send request
 	resp, err := client.Do(req)
@@ -221,7 +345,7 @@ func getRootIdUrl(client *http.Client) string {
 		fmt.Println("Error getting base URL:", err)
 		os.Exit(1)
 	}
-	setHeader(req)
+	setAuthHeader(req)
 
 	// Send request
 	resp, err := client.Do(req)
@@ -246,7 +370,7 @@ func getRootIdUrl(client *http.Client) string {
 	return href
 }
 
-func setHeader(req *http.Request) {
+func setAuthHeader(req *http.Request) {
 	req.Header.Set("umb-project-alias", config.UmbProjectAlias)
 	req.Header.Set("Api-Key", config.UmbApiKey)
 }
@@ -270,4 +394,9 @@ type Show struct {
 type Genre struct {
 	Index int    `json:"indexNumber,omitempty"` // Found in umbraco content body: ~content.genres.$invariant.contentData.indexNumber
 	Title string `json:"title,omitempty"`       // Found in umbraco content body: ~content.genres.$invariant.contentData.title
+}
+
+func timeTrack(start time.Time, name string) {
+	elapsed := time.Since(start)
+	log.Printf("%s took %s", name, elapsed)
 }
