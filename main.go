@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	_ "github.com/joho/godotenv/autoload"
 	"github.com/tidwall/gjson"
@@ -18,6 +22,9 @@ var config = Configs{
 	UmbProjectAlias: os.Getenv("UMB_PROJECT_ALIAS"),
 	UmbApiKey:       os.Getenv("API_KEY"),
 }
+
+var PAGE_SIZE = 250
+var LANGUAGE = "en-US"
 
 func main() {
 
@@ -39,30 +46,82 @@ func main() {
 	// Get total items, iterate over all of them, and download to memory.
 
 	totalUmbShows := getUmbShowCount(client)
-	PAGE_SIZE := 100
-	allUmbShows := &[]UmbShow{}
 
-	// Pages in umbraco are 1 indexed, so it starts at one, and +1 is to compensate for rounding down and
-	for i := 1; i <= int(int(totalUmbShows)/PAGE_SIZE)+1; i++ {
+	allUmbShows := &[]Show{}
+
+	// Pages in umbraco are 1 indexed, so it starts at one, and +1 is to compensate for rounding down
+	for i := 1; i <= (totalUmbShows/PAGE_SIZE)+1; i++ {
 		// paging syntax: BaseURL/children?page=1&pageSize=10
 		url := fmt.Sprintf("%s/children?page=%d&pageSize=%d", config.UmbRootItemURL, i, PAGE_SIZE)
 		shows := getUmbShowPage(client, url)
 		*allUmbShows = append(*allUmbShows, *shows...)
 	}
+
 	str, err := json.MarshalIndent(allUmbShows, "", "  ")
 	if err != nil {
 		return
 	}
 	fmt.Println(string(str))
 
+	// Sort Umbraco entries by movie ID or make into hashmap based on ID
 	// Start fetching and uploading Maze movies.
 	// 		If a movie exists in memory, and the data is not empty, skip it.
-	//		If a movie exists in memory, and it's empty, update it
+	//		If a movie exists in memory, and it has empty values, update it if possible
 	//		If a movie doesn't exist, create and upload it
 
+	// mazeShowsPaged := &[]TVMazeShow{}
+
+	// uploadBatch(*mazeShowsPaged, "UMBRACO UPLOAD URL")
 }
 
-func getUmbShowPage(client *http.Client, url string) *[]UmbShow {
+// NOT FINISHED
+// uploadBatch uploads a batch of shows and returns an error if a fatal issue occurs
+func uploadBatch(shows []Show, apiURL string) error {
+	payload, err := json.Marshal(shows)
+	if err != nil {
+		return fmt.Errorf("failed to serialize batch: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(payload))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	var resp *http.Response
+	retries := 3
+
+	for i := 0; i < retries; i++ {
+		resp, err = client.Do(req)
+		if err != nil {
+			// Check if error is a timeout
+			if errors.Is(err, http.ErrHandlerTimeout) {
+				fmt.Printf("Timeout error, retrying... (%d/%d)\n", i+1, retries)
+				time.Sleep(time.Duration(2<<i) * time.Second) // Exponential backoff
+				continue
+			}
+			return fmt.Errorf("fatal error: %w", err)
+		}
+		defer resp.Body.Close()
+
+		// Handle response codes
+		if resp.StatusCode == http.StatusOK {
+			return nil
+		} else if resp.StatusCode == http.StatusTooManyRequests {
+			fmt.Println("Rate limit hit, retrying...")
+			time.Sleep(time.Duration(2<<i) * time.Second)
+			continue
+		} else {
+			fmt.Printf("Skipping failed upload (status %d)\n", resp.StatusCode)
+			return nil
+		}
+	}
+
+	return fmt.Errorf("batch upload failed after retries")
+}
+
+func getUmbShowPage(client *http.Client, url string) *[]Show {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		fmt.Println("Error creating request:", err)
@@ -85,19 +144,51 @@ func getUmbShowPage(client *http.Client, url string) *[]UmbShow {
 		os.Exit(1)
 	}
 
-	showsJson := gjson.Get(string(body), "_embedded.content").String()
-	result := &[]UmbShow{}
+	shows := gjson.Get(string(body), "_embedded.content")
+	result := &[]Show{}
+	shows.ForEach(func(i, umbShow gjson.Result) bool {
+		show := Show{}
 
-	err = json.Unmarshal([]byte(showsJson), result)
-	if err != nil {
-		fmt.Println("Error decoding JSON:", err)
-		os.Exit(1)
-	}
+		id := umbShow.Get("showId.$invariant")
+		if id.Exists() {
+			if id.String() != "" {
+				num, err := strconv.Atoi(id.String())
+				if err != nil {
+					show.Id = num
+				}
+			}
+		}
+		genres := umbShow.Get("genres.$invariant.contentData.#.title")
+		if genres.Exists() {
+			newGenres := []Genre{}
+			for i, val := range genres.Array() {
+				genre := Genre{
+					Index: i,
+					Title: val.String(),
+				}
+				newGenres = append(newGenres, genre)
+			}
+			show.Genres = newGenres
+		}
+		summary := umbShow.Get(fmt.Sprintf("showSummary.%s.markup", LANGUAGE))
+		if summary.Exists() {
+			show.Summary = summary.String()
+		}
+
+		image := umbShow.Get("showImage.$invariant.0.mediaKey")
+		if image.Exists() {
+			show.Image = image.String()
+		}
+
+		*result = append(*result, show)
+
+		return true // keep iterating
+	})
 
 	return result
 }
 
-func getUmbShowCount(client *http.Client) int64 {
+func getUmbShowCount(client *http.Client) int {
 	req, err := http.NewRequest("GET", config.UmbRootItemURL+"/children", nil)
 	if err != nil {
 		fmt.Println("Error creating request:", err)
@@ -121,7 +212,7 @@ func getUmbShowCount(client *http.Client) int64 {
 	}
 
 	count := gjson.Get(string(body), "_totalItems").Int()
-	return count
+	return int(count)
 }
 
 func getRootIdUrl(client *http.Client) string {
@@ -169,49 +260,14 @@ type Configs struct {
 	UmbBaseURL      string `json:"umb_base_url,omitempty"`
 }
 
-type TVMazeShow struct {
-	Id    int    `json:"id"`
-	Name  string `json:"name,omitempty"`
-	Image Image  `json:"image,omitempty"`
+type Show struct {
+	Id      int     `json:"showId,omitempty"`      // Found in umbraco: ~content.showId.$invariant   found in TVMaze: id
+	Genres  []Genre `json:"genres,omitempty"`      // Found in TVMaze content body as array of strings (titles only): genres
+	Summary string  `json:"showSummary,omitempty"` // Found in umbraco: ~content.showSummary.en-US.markup	found in TVMaze: summary
+	Image   string  `json:"showImage,omitempty"`   // Found in umbraco (is a UID): ~content.showImage.$invariant.[].mediaKey   found in TVMaze (link): image.original
 }
 
-type Image struct {
-	Medium   string `json:"medium,omitempty"`
-	Original string `json:"original,omitempty"`
-}
-
-type UmbShow struct {
-	Genres      Genres      `json:"genres"`
-	ShowID      Invariant   `json:"showId"`
-	ShowSummary ShowSummary `json:"showSummary"`
-	ShowImage   Invariant   `json:"showImage"`
-}
-
-// Genres struct contains the $invariant field
-type Genres struct {
-	Invariant interface{} `json:"$invariant,omitempty"`
-}
-
-// Invariant is used for fields like "showId" and "showImage"
-type Invariant struct {
-	Invariant interface{} `json:"$invariant"` // Can be string, array, or other types
-}
-
-// ShowSummary contains localized summaries
-type ShowSummary struct {
-	EnUS *LocaleContent `json:"en-US,omitempty"`
-	DaDK *interface{}   `json:"da-DK,omitempty"` // Null value placeholder
-}
-
-// LocaleContent contains markup and blocks
-type LocaleContent struct {
-	Markup string `json:"markup"`
-	Blocks Blocks `json:"blocks"`
-}
-
-// Blocks structure for showSummary
-type Blocks struct {
-	Layout       interface{}   `json:"layout"` // Null value placeholder
-	ContentData  []interface{} `json:"contentData"`
-	SettingsData []interface{} `json:"settingsData"`
+type Genre struct {
+	Index int    `json:"indexNumber,omitempty"` // Found in umbraco content body: ~content.genres.$invariant.contentData.indexNumber
+	Title string `json:"title,omitempty"`       // Found in umbraco content body: ~content.genres.$invariant.contentData.title
 }
