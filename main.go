@@ -14,11 +14,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/flytam/filenamify"
 	_ "github.com/joho/godotenv/autoload"
 	"github.com/tidwall/gjson"
 )
 
-var config = Configs{
+var config = &Configs{
 	MazeBaseURL:     "https://api.tvmaze.com/shows?page=",
 	UmbBaseURL:      "https://api.rainbowsrock.net/",
 	UmbProjectAlias: os.Getenv("UMB_PROJECT_ALIAS"),
@@ -29,10 +30,6 @@ var PAGE_SIZE = 250
 var LANGUAGE = "en-US"
 
 func main() {
-	key, _ := createUmbImage("SomeImgName.jpg", "https://static.tvmaze.com/uploads/images/medium_portrait/1/4600.jpg")
-	fmt.Println(key)
-	return
-
 	// Create an HTTP client
 	client := &http.Client{}
 
@@ -49,6 +46,30 @@ func main() {
 
 	// https://docs.umbraco.com/umbraco-heartcore/api-documentation/content-management/content
 	// Get total items, iterate over all of them, and download to memory.
+
+	maze_show, err := getMazeShow("https://api.tvmaze.com/shows/562")
+	if err != nil {
+		println("error when fething show", err)
+		return
+	}
+	key, err := createUmbImage(maze_show.Name, maze_show.Image)
+	if err != nil {
+		println("error when uploading image", err)
+		maze_show.Image = ""
+	} else {
+		maze_show.Image = key
+	}
+
+	obj, _ := json.MarshalIndent(maze_show, "", "  ")
+	fmt.Printf("%s\n", obj)
+
+	err = createUmbShow(client, maze_show)
+	if err != nil {
+		fmt.Println("Error when creating umbraco show", err)
+		return
+	}
+
+	return
 
 	totalUmbShows := getUmbShowCount(client)
 
@@ -73,9 +94,60 @@ func main() {
 	// uploadBatch(*mazeShowsPaged, "UMBRACO UPLOAD URL")
 }
 
+// Temp function
+func getMazeShow(url string) (Show, error) {
+	show := Show{}
+	// Fetch the show from the URL
+	resp, err := http.Get(url)
+	if err != nil {
+		fmt.Println("Error downloading image:", err)
+		return show, err
+	}
+	defer resp.Body.Close()
+
+	// Check if the request was successful
+	if resp.StatusCode != http.StatusOK {
+		fmt.Println("Failed to download image, status:", resp.Status)
+		return show, err
+	}
+
+	// Read the show data
+	showData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("Error reading image data:", err)
+		return show, err
+	}
+	showJson := string(showData)
+	show.Id = int(gjson.Get(showJson, "id").Int())
+	show.Name = gjson.Get(showJson, "name").String()
+	show.Summary = gjson.Get(showJson, "summary").String()
+	show.Image = gjson.Get(showJson, "image.medium").String()
+	genres := gjson.Get(showJson, "genres")
+	if genres.Exists() {
+		newGenres := []Genre{}
+		for i, val := range genres.Array() {
+			genre := Genre{
+				Index: i,
+				Title: val.String(),
+			}
+			newGenres = append(newGenres, genre)
+		}
+		show.Genres = newGenres
+	}
+	return show, nil
+}
+
 // Returns the mediaKey of this new media image
 func createUmbImage(imgName string, imgUrl string) (string, error) {
 
+	imgName, err := filenamify.Filenamify(imgName, filenamify.Options{
+		Replacement: "_",
+	})
+	imgName += ".jpg"
+	if err != nil {
+		fmt.Println("Failed to convert image name to file name", err)
+		return "", err
+	}
 	// Define the metadata as a struct
 	metadata := map[string]interface{}{
 		"mediaTypeAlias": "Image",
@@ -176,19 +248,40 @@ func createUmbImage(imgName string, imgUrl string) (string, error) {
 }
 
 func createUmbShow(client *http.Client, show Show) error {
-
-	// SET THE BODY
-
-	req, err := http.NewRequest("POST", config.UmbRootItemURL, nil)
+	// Create JSON string with fmt.Sprintf
+	jsonData := fmt.Sprintf(`{
+		"parentId": "%s",
+		"sortOrder": 0,
+		"contentTypeAlias": "tVShow",
+		"name": {
+			"%s": "%s"
+		},
+		"showId": {
+			"$invariant": %d
+		},
+		"showSummary": {
+			"%s": "%s"
+		},
+		"showImage": {
+			"$invariant": [
+				{
+					"mediaKey": "%s"
+				}
+			]
+		}
+	}`, config.UmbRootItemId, LANGUAGE, show.Name, show.Id, LANGUAGE, show.Summary, show.Image)
+	println(jsonData)
+	req, err := http.NewRequest("POST", config.UmbBaseURL+"content", bytes.NewBuffer([]byte(jsonData)))
 	if err != nil {
 		fmt.Println("Error creating request:", err)
 		return err
 	}
 	setAuthHeader(req)
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 
 	// Send request
 	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != 200 {
+	if err != nil || resp.StatusCode != 201 {
 		fmt.Printf("Error sending request. Status: %d\nError: %v", resp.StatusCode, err)
 		return err
 	}
@@ -280,6 +373,12 @@ func getUmbShowPage(client *http.Client, url string) *[]Show {
 				if err != nil {
 					show.Id = num
 				}
+			}
+		}
+		name := umbShow.Get(fmt.Sprintf("name.%s", LANGUAGE))
+		if name.Exists() {
+			if name.String() != "" {
+				show.Name = name.String()
 			}
 		}
 		genres := umbShow.Get("genres.$invariant.contentData.#.title")
@@ -386,6 +485,7 @@ type Configs struct {
 
 type Show struct {
 	Id      int     `json:"showId,omitempty"`      // Found in umbraco: ~content.showId.$invariant   found in TVMaze: id
+	Name    string  `json:"name,omitempty"`        // Found in umbraco: ~content.name.$invariant   found in TVMaze: name
 	Genres  []Genre `json:"genres,omitempty"`      // Found in TVMaze content body as array of strings (titles only): genres
 	Summary string  `json:"showSummary,omitempty"` // Found in umbraco: ~content.showSummary.en-US.markup	found in TVMaze: summary
 	Image   string  `json:"showImage,omitempty"`   // Found in umbraco (is a UID): ~content.showImage.$invariant.[].mediaKey   found in TVMaze (link): image.original
