@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/flytam/filenamify"
 	_ "github.com/joho/godotenv/autoload"
 	"github.com/tidwall/gjson"
@@ -370,7 +372,10 @@ func createUmbImage(imgName string, imgUrl string) (string, error) {
 
 func sendUmbShow(requestType string, show Show) error {
 	// TODO: Generate Genres json string
-
+	genreJson, err := genreFormatter(show.Genres)
+	if err != nil {
+		genreJson = ""
+	}
 	// Create JSON string with fmt.Sprintf
 	jsonData := fmt.Sprintf(`{
 		"parentId": "%s",
@@ -378,6 +383,12 @@ func sendUmbShow(requestType string, show Show) error {
 		"contentTypeAlias": "tVShow",
 		"name": {
 			"%s": "%s"
+		},
+		"genres": {
+			"$invariant": {
+				%s,
+				"settingsData": []
+			}
 		},
 		"showId": {
 			"$invariant": %d
@@ -392,15 +403,13 @@ func sendUmbShow(requestType string, show Show) error {
 				}
 			]
 		}
-	}`, config.UmbRootItemId, LANGUAGE, strings.ReplaceAll(show.Name, "\"", "\\\""), show.Id, LANGUAGE, strings.ReplaceAll(show.Summary, "\"", "\\\""), show.Image)
-
+	}`, config.UmbRootItemId, LANGUAGE, strings.ReplaceAll(show.Name, "\"", "\\\""), genreJson, show.Id, LANGUAGE, strings.ReplaceAll(show.Summary, "\"", "\\\""), show.Image)
 	url := ""
 	if requestType == "POST" {
 		url = config.UmbBaseURL + "content"
 	} else {
 		url = config.UmbBaseURL + "content/" + show.UmbId
 	}
-
 	req, err := http.NewRequest(requestType, url, bytes.NewBuffer([]byte(jsonData)))
 	if err != nil {
 		fmt.Println("Error creating request:", err)
@@ -408,6 +417,8 @@ func sendUmbShow(requestType string, show Show) error {
 	}
 	setAuthHeader(req)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Transfer-Encoding", "chunked")
+	req.Header.Set("Connection", "keep-alive")
 
 	// Send request
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -421,6 +432,52 @@ func sendUmbShow(requestType string, show Show) error {
 	}
 	defer resp.Body.Close()
 	return nil
+}
+
+func genreFormatter(genres []Genre) (string, error) {
+	// Generate unique UDI for each genre
+	var layout Layout
+	var contentData []ContentData
+	contentTypeKey := "8a2cd752-ace4-433c-a6ce-f80a70405407"
+
+	for _, genre := range genres {
+		udi := fmt.Sprintf("umb://element/%s", generateCustomUUID()) // Function to generate UDI
+		layout.UmbracoBlockList = append(layout.UmbracoBlockList, ContentUdi{ContentUdi: udi})
+		contentData = append(contentData, ContentData{
+			ContentTypeKey: contentTypeKey,
+			Udi:            udi,
+			IndexNumber:    fmt.Sprintf("%d", genre.Index),
+			Title:          genre.Title,
+		})
+	}
+
+	// Create the full JSON structure
+	genreJson := JSONGenres{
+		Layout:      layout,
+		ContentData: contentData,
+	}
+
+	// Marshal to JSON
+	jsonBytes, err := json.MarshalIndent(genreJson, "", "	")
+	if err != nil {
+		return "", err
+	}
+	// Convert to string and remove outer curly braces
+	jsonString := string(jsonBytes)
+	jsonString = strings.TrimPrefix(jsonString, "{")
+	jsonString = strings.TrimSuffix(jsonString, "}")
+
+	return jsonString, nil
+}
+
+// generateCustomUUID generates a 32-character random string with lowercase letters and digits.
+func generateCustomUUID() string {
+	newUUID, err := uuid.NewRandom() // Generate a random UUID
+	if err != nil {
+		panic(err) // Handle errors properly in production
+	}
+	return strings.ReplaceAll(newUUID.String(), "-", "") // Remove dashes
+
 }
 
 // NOT FINISHED
@@ -641,4 +698,28 @@ type Genre struct {
 func timeTrack(start time.Time, name string) {
 	elapsed := time.Since(start)
 	log.Printf("%s took %s", name, elapsed)
+}
+
+// Used for Umbraco API JSON formatting
+type Layout struct {
+	UmbracoBlockList []ContentUdi `json:"Umbraco.BlockList"`
+}
+
+// Used for Umbraco API JSON formatting
+type ContentUdi struct {
+	ContentUdi string `json:"contentUdi"`
+}
+
+// Used for Umbraco API JSON formatting
+type ContentData struct {
+	ContentTypeKey string `json:"contentTypeKey"`
+	Udi            string `json:"udi"`
+	IndexNumber    string `json:"indexNumber"`
+	Title          string `json:"title"`
+}
+
+// Used for Umbraco API JSON formatting
+type JSONGenres struct {
+	Layout      Layout        `json:"layout"`
+	ContentData []ContentData `json:"contentData"`
 }
