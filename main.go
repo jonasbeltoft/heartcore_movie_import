@@ -388,7 +388,7 @@ func sendUmbShow(requestType string, show Show) error {
 				}
 			]
 		}
-	}`, config.UmbRootItemId, LANGUAGE, show.Name, show.Id, LANGUAGE, show.Summary, show.Image)
+	}`, config.UmbRootItemId, LANGUAGE, strings.ReplaceAll(show.Name, "\"", "\\\""), show.Id, LANGUAGE, strings.ReplaceAll(show.Summary, "\"", "\\\""), show.Image)
 
 	req, err := http.NewRequest(requestType, config.UmbBaseURL+"content", bytes.NewBuffer([]byte(jsonData)))
 	if err != nil {
