@@ -49,6 +49,7 @@ func main() {
 
 	totalUmbShows := getUmbShowCount()
 
+	fmt.Println("Beginning umbraco download...")
 	allUmbShows := getAllUmbShows(totalUmbShows)
 	if allUmbShows == nil {
 		fmt.Println("Unable to fetch umb shows")
@@ -62,17 +63,21 @@ func main() {
 	//		If a movie doesn't exist, create and upload it
 	fmt.Println("Beginning upload...")
 	defer timeTrack(time.Now(), "Total time to upload")
-	page := 0
+	page := 1
+	count := 1
 	for {
 
 		mazePage, err := getMazePage(config.MazeBaseURL + strconv.Itoa(page))
 		if err != nil {
-			println("error when fething show", err)
+			println(err)
 			return
 		}
 
-		for _, mazeShow := range mazePage {
-			fmt.Printf("ID: %d\r", mazeShow.Id)
+		for i, mazeShow := range mazePage {
+			if i >= 5 { // TEST LIMIT
+				break
+			}
+
 			// If it already is in umbraco
 			if umbShow, exists := allUmbShows[mazeShow.Id]; exists {
 				// If no image is attached, upload image
@@ -102,8 +107,10 @@ func main() {
 					})
 					if err != nil {
 						fmt.Println("Error when creating umbraco show", err)
-						continue
 					}
+					fmt.Printf("Count: %d\tID: %d\r", count, mazeShow.Id)
+				} else {
+					fmt.Printf("Skipping nr: %d\tID: %d\n", count, mazeShow.Id)
 				}
 			} else {
 				key, err := retryImage(8, 200*time.Millisecond, 10*time.Second, func() (string, error) {
@@ -116,19 +123,19 @@ func main() {
 					mazeShow.Image = key
 				}
 
-				// TODO Genres
 				err = retry(8, 200*time.Millisecond, 10*time.Second, func() error {
 					return sendUmbShow("POST", mazeShow)
 				})
 				if err != nil {
 					fmt.Println("Error when creating umbraco show", err)
-					continue
 				}
+				fmt.Printf("Count: %d\tID: %d\r", count, mazeShow.Id)
 			}
-
+			count++
 		}
 
 		break // Test one page e.g. 250 shows
+		page++
 	}
 	// uploadBatch(*mazeShowsPaged, "UMBRACO UPLOAD URL")
 }
@@ -204,21 +211,24 @@ func getMazePage(url string) ([]Show, error) {
 	// Fetch the show from the URL
 	resp, err := http.Get(url)
 	if err != nil {
-		fmt.Println("Error downloading image:", err)
+		fmt.Println("Error downloading shows:", err)
 		return shows, err
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == 404 {
+		return shows, fmt.Errorf("end of shows API reached")
+	}
 	// Check if the request was successful
 	if resp.StatusCode != http.StatusOK {
-		fmt.Println("Failed to download image, status:", resp.Status)
+		fmt.Println("Failed to download shows, status:", resp.Status)
 		return shows, err
 	}
 
 	// Read the show data
 	showsData, err := io.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Println("Error reading image data:", err)
+		fmt.Println("Error reading shows data:", err)
 		return shows, err
 	}
 	showsGJson := gjson.Parse(string(showsData))
@@ -359,10 +369,9 @@ func createUmbImage(imgName string, imgUrl string) (string, error) {
 }
 
 func sendUmbShow(requestType string, show Show) error {
+	// TODO: Generate Genres json string
+
 	// Create JSON string with fmt.Sprintf
-
-	// TODO: Handle quotations in summary and maybe name and other text. It causes errors
-
 	jsonData := fmt.Sprintf(`{
 		"parentId": "%s",
 		"sortOrder": 0,
@@ -385,15 +394,20 @@ func sendUmbShow(requestType string, show Show) error {
 		}
 	}`, config.UmbRootItemId, LANGUAGE, strings.ReplaceAll(show.Name, "\"", "\\\""), show.Id, LANGUAGE, strings.ReplaceAll(show.Summary, "\"", "\\\""), show.Image)
 
-	req, err := http.NewRequest(requestType, config.UmbBaseURL+"content", bytes.NewBuffer([]byte(jsonData)))
+	url := ""
+	if requestType == "POST" {
+		url = config.UmbBaseURL + "content"
+	} else {
+		url = config.UmbBaseURL + "content/" + show.UmbId
+	}
+
+	req, err := http.NewRequest(requestType, url, bytes.NewBuffer([]byte(jsonData)))
 	if err != nil {
 		fmt.Println("Error creating request:", err)
 		return err
 	}
 	setAuthHeader(req)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.Header.Set("Transfer-Encoding", "chunked")
-	req.Header.Set("Connection", "keep-alive")
 
 	// Send request
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -487,6 +501,9 @@ func getUmbShowPage(url string) ([]Show, error) {
 	}
 	shows.ForEach(func(i, umbShow gjson.Result) bool {
 		show := Show{}
+
+		UmbId := umbShow.Get("_id")
+		show.UmbId = UmbId.String()
 
 		id := umbShow.Get("showId.$invariant")
 		if id.Exists() {
@@ -608,6 +625,7 @@ type Configs struct {
 }
 
 type Show struct {
+	UmbId   string  `json:"_id,omitempty"`         // Found in umbraco ~content._id
 	Id      int     `json:"showId,omitempty"`      // Found in umbraco: ~content.showId.$invariant   found in TVMaze: id
 	Name    string  `json:"name,omitempty"`        // Found in umbraco: ~content.name.$invariant   found in TVMaze: name
 	Genres  []Genre `json:"genres,omitempty"`      // Found in TVMaze content body as array of strings (titles only): genres
