@@ -43,7 +43,6 @@ func main() {
 	config.UmbRootItemURL = rootUrl
 	_urlSplit := strings.Split(rootUrl, "/")
 	config.UmbRootItemId = _urlSplit[len(_urlSplit)-1]
-	fmt.Println("Root URL fetched: ", config.UmbRootItemURL)
 
 	// https://docs.umbraco.com/umbraco-heartcore/api-documentation/content-management/content
 	// Get total items, iterate over all of them, and download to memory.
@@ -61,6 +60,8 @@ func main() {
 	// 		If a movie exists in memory, and the data is not empty, skip it.
 	//		If a movie exists in memory, and it has empty values, update it if possible
 	//		If a movie doesn't exist, create and upload it
+	fmt.Println("Beginning upload...")
+	defer timeTrack(time.Now(), "Total time to upload")
 	page := 0
 	for {
 
@@ -70,12 +71,8 @@ func main() {
 			return
 		}
 
-		defer timeTrack(time.Now(), "Total time to upload")
-		for i, mazeShow := range mazePage {
-			if i >= 5 {
-				break
-			} // Test on 5 shows
-
+		for _, mazeShow := range mazePage {
+			fmt.Printf("ID: %d\r", mazeShow.Id)
 			// If it already is in umbraco
 			if umbShow, exists := allUmbShows[mazeShow.Id]; exists {
 				// If no image is attached, upload image
@@ -131,7 +128,7 @@ func main() {
 
 		}
 
-		break // Test one page
+		break // Test one page e.g. 250 shows
 	}
 	// uploadBatch(*mazeShowsPaged, "UMBRACO UPLOAD URL")
 }
@@ -189,12 +186,10 @@ func getAllUmbShows(totalUmbShows int) map[int]Show {
 		shows, err := getUmbShowPage(url)
 		if err != nil {
 			fmt.Println("Failed to fetch umbraco page. ", err)
-			// INSERT RETRY LOGIC
 			return nil
 		}
 
 		for _, show := range shows {
-			fmt.Println(show.Id, show.Name)
 			allUmbShows[show.Id] = show
 		}
 	}
