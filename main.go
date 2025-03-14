@@ -52,7 +52,7 @@ func main() {
 	// Get total items, iterate over all of them, and download to memory.
 
 	totalUmbShows := getUmbShowCount()
-	totalPages := 5 // 332
+	totalPages := 332
 
 	fmt.Println("Beginning umbraco download...")
 	allUmbShows := getAllUmbShows(totalUmbShows)
@@ -63,7 +63,7 @@ func main() {
 	println("Total Umbraco shows fetched: ", len(allUmbShows))
 
 	// DELETION CODE COMMENT OUT TO DELETE ALL DATA FROM UMBRACO
-	// deleteAll(allUmbShows) // It's a bit buggy, but largely works
+	// deleteAll(allUmbShows) // If duplicates are in the map, they wont be deleted and will need a second pass
 	// return
 
 	// make Umbraco entries into hashmap based on ID
@@ -189,9 +189,9 @@ func processPage(page int, allUmbShows map[int]Show, wg *sync.WaitGroup) int {
 				if err != nil {
 					fmt.Println("Error when creating umbraco show", err)
 				}
-				fmt.Printf("Page: %d\tCount: %d\tID: %d\n", page, count, mazeShow.Id)
+				fmt.Printf("Page: %d\tCount: %d\tID: %d\r", page, count, mazeShow.Id)
 			} else {
-				fmt.Printf("Page: %d\tSkipping nr: %d\tID: %d\n", page, count, mazeShow.Id)
+				fmt.Printf("Page: %d\tSkipping nr: %d\tID: %d\r", page, count, mazeShow.Id)
 			}
 		} else {
 			key, err := retryImage(8, 200*time.Millisecond, 10*time.Second, func() (string, error) {
@@ -210,7 +210,7 @@ func processPage(page int, allUmbShows map[int]Show, wg *sync.WaitGroup) int {
 			if err != nil {
 				fmt.Println("Error when creating umbraco show", err)
 			}
-			fmt.Printf("Page: %d\tCount: %d\tID: %d\n", page, count, mazeShow.Id)
+			fmt.Printf("Page: %d\tCount: %d\tID: %d\r", page, count, mazeShow.Id)
 		}
 		count++
 	}
