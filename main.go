@@ -499,7 +499,7 @@ func createUmbImage(imgName string, imgUrl string) (string, error) {
 	// Read response body
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil || resp.StatusCode != 201 {
-		fmt.Println("Error reading umb image response:", err)
+		//fmt.Println("Error reading umb image response:", err)
 		return "", err
 	}
 
