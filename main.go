@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -30,8 +29,9 @@ var config = &Configs{
 	UmbApiKey:       os.Getenv("API_KEY"),
 }
 
-const WORKER_COUNT = 5 // Number of concurrent page uploads
+const WORKER_COUNT = 5 // Number of concurrent page uploads. 5 seems to be just hitting the rate limit
 const PAGE_SIZE = 250
+const TOTAL_PAGES = 332 // Real number is 332
 const LANGUAGE = "en-US"
 
 func main() {
@@ -52,7 +52,6 @@ func main() {
 	// Get total items, iterate over all of them, and download to memory.
 
 	totalUmbShows := getUmbShowCount()
-	totalPages := 332
 
 	fmt.Println("Beginning umbraco download...")
 	allUmbShows := getAllUmbShows(totalUmbShows)
@@ -86,7 +85,7 @@ func main() {
 	}
 
 	// Send pages to workers
-	for page := 0; page <= totalPages; page++ {
+	for page := 0; page <= TOTAL_PAGES; page++ {
 		wg.Add(1)
 		pageChan <- page
 	}
@@ -100,7 +99,7 @@ func main() {
 
 func deleteAll(allUmbShows map[int]Show) {
 	defer timeTrack(time.Now(), "Deletion of all shows and images")
-	client := &http.Client{}
+	client := &http.Client{Timeout: 60 * time.Second}
 	total := len(allUmbShows)
 	count := 0
 	for _, show := range allUmbShows {
@@ -148,9 +147,57 @@ func deleteAll(allUmbShows map[int]Show) {
 			fmt.Printf("Failed to delete image %s, status code: %d\n", show.UmbId, resp.StatusCode)
 		}
 	}
+	req, err := http.NewRequest("GET", config.UmbBaseURL+"media", nil)
+	if err != nil {
+		fmt.Println("Error creating request:", err)
+		return
+	}
+	setAuthHeader(req)
+
+	// Send request
+	fmt.Println("Downloading all image ID's to delete")
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		fmt.Printf("Error sending request. Status: %d\nError: %v", resp.StatusCode, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("Error reading response:", err)
+		return
+	}
+
+	images := gjson.Get(string(body), "_embedded.media")
+	if !images.Exists() {
+		return
+	}
+	images.ForEach(func(i, umbShow gjson.Result) bool {
+
+		umbId := umbShow.Get("_id")
+		url := fmt.Sprintf("%smedia/%s", config.UmbBaseURL, umbId)
+		req, err := http.NewRequest("DELETE", url, nil)
+		if err != nil {
+			fmt.Println("Error creating request:", err)
+			return true
+		}
+		setAuthHeader(req)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			fmt.Println("Error sending request:", err)
+			return true
+		}
+		fmt.Println("Deleted img: ", umbId)
+		resp.Body.Close()
+		return true // keep iterating
+	})
 }
 
 func processPage(page int, allUmbShows map[int]Show, wg *sync.WaitGroup) int {
+	defer timeTrack(time.Now(), fmt.Sprintf("Page %3d completed upload", page))
 	defer wg.Done()
 	mazePage, err := getMazePage(config.MazeBaseURL + strconv.Itoa(page))
 	if err != nil {
@@ -189,9 +236,9 @@ func processPage(page int, allUmbShows map[int]Show, wg *sync.WaitGroup) int {
 				if err != nil {
 					fmt.Println("Error when creating umbraco show", err)
 				}
-				fmt.Printf("Page: %d\tCount: %d\tID: %d\r", page, count, mazeShow.Id)
+				fmt.Printf("Page: %6d\tCount: %6d\tID: %6d\r", page, count, mazeShow.Id)
 			} else {
-				fmt.Printf("Page: %d\tSkipping nr: %d\tID: %d\r", page, count, mazeShow.Id)
+				fmt.Printf("Page: %6d\tCount: %6d\tID: %6d\r", page, count, mazeShow.Id)
 			}
 		} else {
 			key, err := retryImage(8, 200*time.Millisecond, 10*time.Second, func() (string, error) {
@@ -210,7 +257,7 @@ func processPage(page int, allUmbShows map[int]Show, wg *sync.WaitGroup) int {
 			if err != nil {
 				fmt.Println("Error when creating umbraco show", err)
 			}
-			fmt.Printf("Page: %d\tCount: %d\tID: %d\r", page, count, mazeShow.Id)
+			//fmt.Printf("Page: %6d\tCount: %6d\tID: %6d\r", page, count, mazeShow.Id)
 		}
 		count++
 	}
@@ -218,7 +265,7 @@ func processPage(page int, allUmbShows map[int]Show, wg *sync.WaitGroup) int {
 }
 
 func retry(attempts int, initialDelay time.Duration, maxDelay time.Duration, fn func() error) error {
-	var err error
+	var err error = nil
 	delay := initialDelay
 
 	for i := 0; i < attempts; i++ {
@@ -239,11 +286,10 @@ func retry(attempts int, initialDelay time.Duration, maxDelay time.Duration, fn 
 	return fmt.Errorf("all %d retry attempts failed: %w", attempts, err)
 }
 func retryImage(attempts int, initialDelay time.Duration, maxDelay time.Duration, fn func() (string, error)) (string, error) {
-	var err error
+	var err error = nil
 	delay := initialDelay
 
 	for i := 0; i < attempts; i++ {
-
 		key, err := fn()
 		if err == nil {
 			return key, nil // Success, exit early
@@ -369,6 +415,9 @@ func createUmbImage(imgName string, imgUrl string) (string, error) {
 		fmt.Println("Error downloading image:", err)
 		if resp != nil {
 			resp.Body.Close()
+		}
+		if strings.Contains(err.Error(), "unsupported protocol scheme") {
+			return "", nil // Skip retry
 		}
 		return "", err
 	}
@@ -525,8 +574,8 @@ func sendUmbShow(requestType string, show Show) error {
 	}
 	defer resp.Body.Close()
 
-	if (requestType == "POST" && resp.StatusCode != 201) || (requestType == "PUT" && resp.StatusCode != 200) {
-		fmt.Printf("Error sending request. ID: %d. Status: %d\n", show.Id, resp.StatusCode)
+	if resp.StatusCode != 201 && resp.StatusCode != 200 {
+		fmt.Printf("Server error. ID: %d. Status: %d\n", show.Id, resp.StatusCode)
 		return fmt.Errorf("status error: %d", resp.StatusCode)
 	}
 	return nil
@@ -581,53 +630,6 @@ func generateCustomUUID() string {
 	}
 	return strings.ReplaceAll(newUUID.String(), "-", "") // Remove dashes
 
-}
-
-// NOT FINISHED
-// uploadBatch uploads a batch of shows and returns an error if a fatal issue occurs
-func uploadBatch(shows []Show, apiURL string) error {
-	payload, err := json.Marshal(shows)
-	if err != nil {
-		return fmt.Errorf("failed to serialize batch: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(payload))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	var resp *http.Response
-	retries := 3
-
-	for i := 0; i < retries; i++ {
-		resp, err = client.Do(req)
-		if err != nil {
-			// Check if error is a timeout
-			if errors.Is(err, http.ErrHandlerTimeout) {
-				fmt.Printf("Timeout error, retrying... (%d/%d)\n", i+1, retries)
-				time.Sleep(time.Duration(2<<i) * time.Second) // Exponential backoff
-				continue
-			}
-			return fmt.Errorf("fatal error: %w", err)
-		}
-		defer resp.Body.Close()
-
-		// Handle response codes
-		if resp.StatusCode == http.StatusOK {
-			return nil
-		} else if resp.StatusCode == http.StatusTooManyRequests {
-			fmt.Println("Rate limit hit, retrying...")
-			time.Sleep(time.Duration(2<<i) * time.Second)
-			continue
-		} else {
-			fmt.Printf("Skipping failed upload (status %d)\n", resp.StatusCode)
-			return nil
-		}
-	}
-
-	return fmt.Errorf("batch upload failed after retries")
 }
 
 func getUmbShowPage(url string) ([]Show, error) {
