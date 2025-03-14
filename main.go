@@ -22,6 +22,8 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// Build command: go build -ldflags "-X main.UMB_PROJ_ALIAS=$UMB_PROJECT_ALIAS -X main.UMB_API_KEY=$API_KEY" -o uploader .
+
 var config = &Configs{
 	MazeBaseURL: "https://api.tvmaze.com/shows?page=",
 	UmbBaseURL:  "https://api.rainbowsrock.net/",
