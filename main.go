@@ -23,11 +23,12 @@ import (
 )
 
 var config = &Configs{
-	MazeBaseURL:     "https://api.tvmaze.com/shows?page=",
-	UmbBaseURL:      "https://api.rainbowsrock.net/",
-	UmbProjectAlias: os.Getenv("UMB_PROJECT_ALIAS"),
-	UmbApiKey:       os.Getenv("API_KEY"),
+	MazeBaseURL: "https://api.tvmaze.com/shows?page=",
+	UmbBaseURL:  "https://api.rainbowsrock.net/",
 }
+
+var UMB_PROJ_ALIAS = os.Getenv("UMB_PROJECT_ALIAS")
+var UMB_API_KEY = os.Getenv("API_KEY")
 
 const WORKER_COUNT = 5 // Number of concurrent page uploads. 5 seems to be just hitting the rate limit
 const PAGE_SIZE = 250
@@ -773,17 +774,15 @@ func getRootIdUrl(client *http.Client) string {
 }
 
 func setAuthHeader(req *http.Request) {
-	req.Header.Set("umb-project-alias", config.UmbProjectAlias)
-	req.Header.Set("Api-Key", config.UmbApiKey)
+	req.Header.Set("umb-project-alias", UMB_PROJ_ALIAS)
+	req.Header.Set("Api-Key", UMB_API_KEY)
 }
 
 type Configs struct {
-	UmbRootItemId   string `json:"root_id,omitempty"`
-	UmbRootItemURL  string `json:"root_url,omitempty"`
-	UmbProjectAlias string `json:"umb-project-alias,omitempty"`
-	UmbApiKey       string `json:"Api-Key,omitempty"`
-	MazeBaseURL     string `json:"maze_base_url,omitempty"`
-	UmbBaseURL      string `json:"umb_base_url,omitempty"`
+	UmbRootItemId  string `json:"root_id,omitempty"`
+	UmbRootItemURL string `json:"root_url,omitempty"`
+	MazeBaseURL    string `json:"maze_base_url,omitempty"`
+	UmbBaseURL     string `json:"umb_base_url,omitempty"`
 }
 
 type Show struct {
