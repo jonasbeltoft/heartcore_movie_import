@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,8 +30,9 @@ var config = &Configs{
 	UmbApiKey:       os.Getenv("API_KEY"),
 }
 
-var PAGE_SIZE = 250
-var LANGUAGE = "en-US"
+const WORKER_COUNT = 5 // Number of concurrent page uploads
+const PAGE_SIZE = 250
+const LANGUAGE = "en-US"
 
 func main() {
 	// Create an HTTP client
@@ -50,6 +52,7 @@ func main() {
 	// Get total items, iterate over all of them, and download to memory.
 
 	totalUmbShows := getUmbShowCount()
+	totalPages := 5 // 332
 
 	fmt.Println("Beginning umbraco download...")
 	allUmbShows := getAllUmbShows(totalUmbShows)
@@ -57,6 +60,11 @@ func main() {
 		fmt.Println("Unable to fetch umb shows")
 		return
 	}
+	println("Total Umbraco shows fetched: ", len(allUmbShows))
+
+	// DELETION CODE COMMENT OUT TO DELETE ALL DATA FROM UMBRACO
+	// deleteAll(allUmbShows) // It's a bit buggy, but largely works
+	// return
 
 	// make Umbraco entries into hashmap based on ID
 	// Start fetching and uploading Maze movies.
@@ -65,81 +73,148 @@ func main() {
 	//		If a movie doesn't exist, create and upload it
 	fmt.Println("Beginning upload...")
 	defer timeTrack(time.Now(), "Total time to upload")
-	page := 1
-	count := 1
-	for {
+	var wg sync.WaitGroup
+	pageChan := make(chan int, WORKER_COUNT)
 
-		mazePage, err := getMazePage(config.MazeBaseURL + strconv.Itoa(page))
+	// Start worker goroutines
+	for i := 0; i < WORKER_COUNT; i++ {
+		go func() {
+			for page := range pageChan {
+				processPage(page, allUmbShows, &wg)
+			}
+		}()
+	}
+
+	// Send pages to workers
+	for page := 0; page <= totalPages; page++ {
+		wg.Add(1)
+		pageChan <- page
+	}
+
+	// Close channel when all pages are sent
+	close(pageChan)
+
+	// Wait for all workers to finish
+	wg.Wait()
+}
+
+func deleteAll(allUmbShows map[int]Show) {
+	defer timeTrack(time.Now(), "Deletion of all shows and images")
+	client := &http.Client{}
+	total := len(allUmbShows)
+	count := 0
+	for _, show := range allUmbShows {
+		fmt.Printf("Deleted %d of %d         \r", count, total)
+		count++
+
+		url := fmt.Sprintf("%scontent/%s", config.UmbBaseURL, show.UmbId)
+		req, err := http.NewRequest("DELETE", url, nil)
 		if err != nil {
-			println(err)
-			return
+			fmt.Println("Error creating request:", err)
+			continue
+		}
+		setAuthHeader(req)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			fmt.Println("Error sending request:", err)
+			continue
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			fmt.Printf("Failed to delete show %s, status code: %d\n", show.UmbId, resp.StatusCode)
 		}
 
-		for i, mazeShow := range mazePage {
-			if i >= 5 { // TEST LIMIT
-				break
-			}
+		if show.Image == "" {
+			continue
+		}
+		url = fmt.Sprintf("%smedia/%s", config.UmbBaseURL, show.Image)
+		req, err = http.NewRequest("DELETE", url, nil)
+		if err != nil {
+			fmt.Println("Error creating request:", err)
+			continue
+		}
+		setAuthHeader(req)
 
-			// If it already is in umbraco
-			if umbShow, exists := allUmbShows[mazeShow.Id]; exists {
-				// If no image is attached, upload image
-				doUpload := false
-				if umbShow.Image == "" {
-					key, err := retryImage(8, 200*time.Millisecond, 10*time.Second, func() (string, error) {
-						return createUmbImage(mazeShow.Name, mazeShow.Image)
-					})
-					if err != nil {
-						println("error when uploading image", err)
-						umbShow.Image = ""
-					} else {
-						umbShow.Image = key
-						doUpload = true
-					}
-				}
-				// TODO Genres
-				if umbShow.Name != mazeShow.Name || umbShow.Summary != mazeShow.Summary {
-					umbShow.Name = mazeShow.Name
-					umbShow.Summary = mazeShow.Summary
-					doUpload = true
-				}
+		resp, err = client.Do(req)
+		if err != nil {
+			fmt.Println("Error sending request:", err)
+			continue
+		}
+		resp.Body.Close()
 
-				if doUpload {
-					err := retry(8, 200*time.Millisecond, 10*time.Second, func() error {
-						return sendUmbShow("PUT", umbShow)
-					})
-					if err != nil {
-						fmt.Println("Error when creating umbraco show", err)
-					}
-					fmt.Printf("Count: %d\tID: %d\r", count, mazeShow.Id)
-				} else {
-					fmt.Printf("Skipping nr: %d\tID: %d\n", count, mazeShow.Id)
-				}
-			} else {
+		if resp.StatusCode != http.StatusOK {
+			fmt.Printf("Failed to delete image %s, status code: %d\n", show.UmbId, resp.StatusCode)
+		}
+	}
+}
+
+func processPage(page int, allUmbShows map[int]Show, wg *sync.WaitGroup) int {
+	defer wg.Done()
+	mazePage, err := getMazePage(config.MazeBaseURL + strconv.Itoa(page))
+	if err != nil {
+		println(err)
+		return 1
+	}
+	count := 1
+	for _, mazeShow := range mazePage {
+		// If it already is in umbraco
+		if umbShow, exists := allUmbShows[mazeShow.Id]; exists {
+			// If no image is attached, upload image
+			doUpload := false
+			if umbShow.Image == "" {
 				key, err := retryImage(8, 200*time.Millisecond, 10*time.Second, func() (string, error) {
 					return createUmbImage(mazeShow.Name, mazeShow.Image)
 				})
 				if err != nil {
 					println("error when uploading image", err)
-					mazeShow.Image = ""
+					umbShow.Image = ""
 				} else {
-					mazeShow.Image = key
+					umbShow.Image = key
+					doUpload = true
 				}
+			}
+			// TODO Genres
+			if umbShow.Name != mazeShow.Name || umbShow.Summary != mazeShow.Summary {
+				umbShow.Name = mazeShow.Name
+				umbShow.Summary = mazeShow.Summary
+				doUpload = true
+			}
 
-				err = retry(8, 200*time.Millisecond, 10*time.Second, func() error {
-					return sendUmbShow("POST", mazeShow)
+			if doUpload {
+				err := retry(8, 200*time.Millisecond, 10*time.Second, func() error {
+					return sendUmbShow("PUT", umbShow)
 				})
 				if err != nil {
 					fmt.Println("Error when creating umbraco show", err)
 				}
-				fmt.Printf("Count: %d\tID: %d\r", count, mazeShow.Id)
+				fmt.Printf("Page: %d\tCount: %d\tID: %d\n", page, count, mazeShow.Id)
+			} else {
+				fmt.Printf("Page: %d\tSkipping nr: %d\tID: %d\n", page, count, mazeShow.Id)
 			}
-			count++
-		}
+		} else {
+			key, err := retryImage(8, 200*time.Millisecond, 10*time.Second, func() (string, error) {
+				return createUmbImage(mazeShow.Name, mazeShow.Image)
+			})
+			if err != nil {
+				println("error when uploading image", err)
+				mazeShow.Image = ""
+			} else {
+				mazeShow.Image = key
+			}
 
-		break // Test one page e.g. 250 shows
-		page++
+			err = retry(8, 200*time.Millisecond, 10*time.Second, func() error {
+				return sendUmbShow("POST", mazeShow)
+			})
+			if err != nil {
+				fmt.Println("Error when creating umbraco show", err)
+			}
+			fmt.Printf("Page: %d\tCount: %d\tID: %d\n", page, count, mazeShow.Id)
+		}
+		count++
 	}
-	// uploadBatch(*mazeShowsPaged, "UMBRACO UPLOAD URL")
+	return 0
 }
 
 func retry(attempts int, initialDelay time.Duration, maxDelay time.Duration, fn func() error) error {
@@ -168,6 +243,7 @@ func retryImage(attempts int, initialDelay time.Duration, maxDelay time.Duration
 	delay := initialDelay
 
 	for i := 0; i < attempts; i++ {
+
 		key, err := fn()
 		if err == nil {
 			return key, nil // Success, exit early
@@ -291,13 +367,21 @@ func createUmbImage(imgName string, imgUrl string) (string, error) {
 	resp, err := http.Get(imgUrl)
 	if err != nil {
 		fmt.Println("Error downloading image:", err)
+		if resp != nil {
+			resp.Body.Close()
+		}
 		return "", err
 	}
-	defer resp.Body.Close()
+
+	if resp == nil {
+		fmt.Println("Failed to get response image")
+		return "", err
+	}
 
 	// Check if the request was successful
 	if resp.StatusCode != http.StatusOK {
 		fmt.Println("Failed to download image, status:", resp.Status)
+		resp.Body.Close()
 		return "", err
 	}
 
@@ -305,8 +389,10 @@ func createUmbImage(imgName string, imgUrl string) (string, error) {
 	imageData, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println("Error reading image data:", err)
+		resp.Body.Close()
 		return "", err
 	}
+	resp.Body.Close()
 
 	// Create a buffer and a multipart writer
 	body := &bytes.Buffer{}
@@ -355,7 +441,7 @@ func createUmbImage(imgName string, imgUrl string) (string, error) {
 	// Send the request
 	client := &http.Client{}
 	resp, err = client.Do(req)
-	if err != nil {
+	if err != nil || resp == nil {
 		fmt.Println("Error sending request:", err)
 		return "", err
 	}
@@ -363,7 +449,7 @@ func createUmbImage(imgName string, imgUrl string) (string, error) {
 	// Read response body
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil || resp.StatusCode != 201 {
-		fmt.Println("Error reading response:", err)
+		fmt.Println("Error reading umb image response:", err)
 		return "", err
 	}
 
@@ -376,6 +462,12 @@ func sendUmbShow(requestType string, show Show) error {
 	if err != nil {
 		genreJson = ""
 	}
+	imgJson := ""
+	if show.Image != "" {
+		imgJson = fmt.Sprintf(`{
+					"mediaKey": "%s"
+				}`, show.Image)
+	}
 	// Create JSON string with fmt.Sprintf
 	jsonData := fmt.Sprintf(`{
 		"parentId": "%s",
@@ -386,7 +478,7 @@ func sendUmbShow(requestType string, show Show) error {
 		},
 		"genres": {
 			"$invariant": {
-				%s,
+				%s
 				"settingsData": []
 			}
 		},
@@ -398,12 +490,10 @@ func sendUmbShow(requestType string, show Show) error {
 		},
 		"showImage": {
 			"$invariant": [
-				{
-					"mediaKey": "%s"
-				}
+				%s
 			]
 		}
-	}`, config.UmbRootItemId, LANGUAGE, strings.ReplaceAll(show.Name, "\"", "\\\""), genreJson, show.Id, LANGUAGE, strings.ReplaceAll(show.Summary, "\"", "\\\""), show.Image)
+	}`, config.UmbRootItemId, LANGUAGE, strings.ReplaceAll(show.Name, "\"", "\\\""), genreJson, show.Id, LANGUAGE, strings.ReplaceAll(show.Summary, "\"", "\\\""), imgJson)
 	url := ""
 	if requestType == "POST" {
 		url = config.UmbBaseURL + "content"
@@ -423,24 +513,36 @@ func sendUmbShow(requestType string, show Show) error {
 	// Send request
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
-	if err != nil || (requestType == "POST" && resp.StatusCode != 201) || (requestType == "PUT" && resp.StatusCode != 200) {
-		fmt.Printf("Error sending request. Status: %d\tError: %v\n", resp.StatusCode, err)
-		if err == nil {
-			err = fmt.Errorf("status error")
-		}
+	if err != nil {
+		fmt.Printf("Error sending request. ID: %d. Error: %v\n", show.Id, err)
 		return err
 	}
+
+	// Ensure response is valid before accessing StatusCode
+	if resp == nil {
+		fmt.Printf("Error: response is nil for ID: %d skipping...\n", show.Id)
+		return nil
+	}
 	defer resp.Body.Close()
+
+	if (requestType == "POST" && resp.StatusCode != 201) || (requestType == "PUT" && resp.StatusCode != 200) {
+		fmt.Printf("Error sending request. ID: %d. Status: %d\n", show.Id, resp.StatusCode)
+		return fmt.Errorf("status error: %d", resp.StatusCode)
+	}
 	return nil
 }
 
 func genreFormatter(genres []Genre) (string, error) {
-	// Generate unique UDI for each genre
+	if len(genres) == 0 {
+		return "", nil
+	}
+
 	var layout Layout
 	var contentData []ContentData
 	contentTypeKey := "8a2cd752-ace4-433c-a6ce-f80a70405407"
 
 	for _, genre := range genres {
+		// Generate unique UDI for each genre
 		udi := fmt.Sprintf("umb://element/%s", generateCustomUUID()) // Function to generate UDI
 		layout.UmbracoBlockList = append(layout.UmbracoBlockList, ContentUdi{ContentUdi: udi})
 		contentData = append(contentData, ContentData{
@@ -466,6 +568,7 @@ func genreFormatter(genres []Genre) (string, error) {
 	jsonString := string(jsonBytes)
 	jsonString = strings.TrimPrefix(jsonString, "{")
 	jsonString = strings.TrimSuffix(jsonString, "}")
+	jsonString += ","
 
 	return jsonString, nil
 }
